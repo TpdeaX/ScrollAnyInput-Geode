@@ -3,21 +3,46 @@
 
 using namespace geode::prelude;
 
-static std::unordered_map<uintptr_t, std::vector<uint8_t>> g_patchedBytes;
+namespace matdash {
+    struct Console {
+        std::ofstream out, in;
+        Console() {
+            AllocConsole();
+            out = decltype(out)("CONOUT$", std::ios::out);
+            in = decltype(in)("CONIN$", std::ios::in);
+            std::cout.rdbuf(out.rdbuf());
+            std::cin.rdbuf(in.rdbuf());
 
+            FILE* dummy;
+            freopen_s(&dummy, "CONOUT$", "w", stdout);
+        }
+        ~Console() {
+            out.close();
+            in.close();
+        }
+    };
 
-
-static std::vector<uint8_t> intToBytes(int paramInt) {
-    std::vector<uint8_t> arrayOfByte(4);
-    for (int i = 0; i < 4; i++)
-        arrayOfByte[3 - i] = (paramInt >> (i * 8));
-
-    std::reverse(arrayOfByte.begin(), arrayOfByte.end());
-    return arrayOfByte;
+    inline void create_console() {
+        static Console console;
+    }
 }
 
+enum class FieldType {
+    Numeric = 0b0001,
+    Signed = 0b0010,
+    Float = 0b0100,
+    NotNumeric = 0b1000,
+};
+
+constexpr int MIN_SIGNED = -999;
+constexpr int MIN_UNSIGNED = 0;
+constexpr int MAX_SIGNED = 999;
+constexpr int INCREMENT_NORMAL = 1;
+constexpr int INCREMENT_BIG = 5;
+constexpr float INCREMENT_SMALL = .1f;
+
 template<typename T>
-static std::string formatToString(T num, unsigned int precision = 60u) {
+static std::string formatNumericToString(T num, unsigned int precision = 60u) {
     std::string res = std::to_string(num);
 
     if (std::is_same<T, float>::value && res.find('.') != std::string::npos) {
@@ -40,120 +65,89 @@ static std::string formatToString(T num, unsigned int precision = 60u) {
     return res;
 }
 
-enum fType {
-    ftNumeric = 0b0001,
-    ftSigned = 0b0010,
-    ftFloat = 0b0100,
-    ftNot = 0b1000,
-};
-
-static constexpr const int MIN_SIGNED = -999;
-static constexpr const int MIN_UNSIGNED = 0;
-static constexpr const int MAX_SIGNED = 999;
-static constexpr const int INC_NORMAL = 1;
-static constexpr const int INC_BIG = 5;
-static constexpr const float INC_SMALL = .1f;
-
-fType isNumericChar(char c) {
+FieldType getCharType(char c) {
     const std::string validChars = "0123456789-+. ";
 
-    for (char cf : validChars) {
-        if (cf == c) {
+    for (char validChar : validChars) {
+        if (validChar == c) {
             switch (c) {
-            case '-': return ftSigned;
-            case '.': return ftFloat;
-            default: return ftNumeric;
+            case '-': return FieldType::Signed;
+            case '.': return FieldType::Float;
+            default: return FieldType::Numeric;
             }
         }
     }
 
-    return ftNot;
+    return FieldType::NotNumeric;
 }
 
-
-// this exists entirely because dynamic_cast<gd::GameObject*> doesnt work
-CCTextInputNode* castToInput(CCObject* obj) {
-    if (obj != nullptr) {
-          return dynamic_cast<CCTextInputNode*>(obj);
-    }
-    return nullptr;
-}
-
-std::vector<CCTextInputNode*> findTextInputNodes(CCNode* parent) {
-    std::vector<CCTextInputNode*> res;
+std::vector<CCTextInputNode*> findTextInputNodesRecursively(CCNode* parent) {
+    std::vector<CCTextInputNode*> result;
 
     for (int i = 0; i < parent->getChildrenCount(); ++i) {
-        auto child = dynamic_cast<CCNode*>(parent->getChildren()->objectAtIndex(i));
+        auto child = typeinfo_cast<CCNode*>(parent->getChildren()->objectAtIndex(i));
 
-        auto input = castToInput(child);
+        auto inputNode = typeinfo_cast<CCTextInputNode*>(child);
 
-        if (input)
-            res.push_back(input);
+        if (inputNode)
+            result.push_back(inputNode);
         else {
-            if (child->getChildrenCount() > 100)
-                continue;
-            if (!child->isVisible())
+            if (child->getChildrenCount() > 100 || !child->isVisible())
                 continue;
 
-            auto cres = findTextInputNodes(child);
-
-            res.insert(res.end(), cres.begin(), cres.end());
+            auto childResults = findTextInputNodesRecursively(child);
+            result.insert(result.end(), childResults.begin(), childResults.end());
         }
     }
 
-    return res;
+    return result;
 }
 
-
-CCTextInputNode* getInputUnderMouse() {
+CCTextInputNode* getInputNodeUnderMouse() {
     auto scene = CCDirector::sharedDirector()->getRunningScene();
 
     auto winSize = CCDirector::sharedDirector()->getWinSize();
     auto winSizePx = CCDirector::sharedDirector()->getOpenGLView()->getViewPortRect();
-    auto ratio_w = winSize.width / winSizePx.size.width;
-    auto ratio_h = winSize.height / winSizePx.size.height;
+    auto widthRatio = winSize.width / winSizePx.size.width;
+    auto heightRatio = winSize.height / winSizePx.size.height;
 
-    auto mpos = CCDirector::sharedDirector()->getOpenGLView()->getMousePosition();
-    // the mouse position is stored from the top-left while cocos
-    // coordinates are from the bottom-left
-    mpos.y = winSizePx.size.height - mpos.y;
+    auto mousePosition = CCDirector::sharedDirector()->getOpenGLView()->getMousePosition();
+    mousePosition.y = winSizePx.size.height - mousePosition.y;
+    mousePosition.x *= widthRatio;
+    mousePosition.y *= heightRatio;
 
-    mpos.x *= ratio_w;  // scale mouse position to be in
-    mpos.y *= ratio_h;  // cocos2d coordinate space
+    auto inputNodes = findTextInputNodesRecursively(scene);
 
-    auto inputs = findTextInputNodes(scene);
+    for (auto inputNode : inputNodes) {
+        auto position = inputNode->getPosition();
+        auto size = inputNode->getScaledContentSize();
+        auto boundingBox = CCRect{ position.x, position.y, size.width, size.height };
 
-    for (auto input : inputs) {
-        auto pos = input->getPosition();
-        auto size = input->getScaledContentSize();
-        auto rect = CCRect{ pos.x, pos.y, size.width, size.height };
+        boundingBox.size = boundingBox.size * 1.2f;
+        boundingBox.origin = boundingBox.origin - boundingBox.size / 2;
 
-        rect.size = rect.size * 1.2f;
-        rect.origin = rect.origin - rect.size / 2;
+        auto mousePositionInNodeSpace = inputNode->getParent()->convertToNodeSpace(mousePosition);
 
-        auto mposn = input->getParent()->convertToNodeSpace(mpos);
-
-        if (rect.containsPoint(mposn))
-            return input;
+        if (boundingBox.containsPoint(mousePositionInNodeSpace))
+            return inputNode;
     }
 
     return nullptr;
 }
 
 class $modify(CCMouseDispatcher) {
-
+public:
     bool dispatchScrollMSG(float x, float y) {
-        auto self = getInputUnderMouse();
+        auto self = getInputNodeUnderMouse();
 
         if (!self) return CCMouseDispatcher::dispatchScrollMSG(x, y);
         if (!self->isVisible()) return CCMouseDispatcher::dispatchScrollMSG(x, y);
 
-
         int type = 0;
         for (auto const& cf : std::string(self->m_allowedChars)) {
-            type |= isNumericChar(cf);
+            type |= static_cast<int>(getCharType(cf));
 
-            if (type & ftNot)
+            if (type & static_cast<int>(FieldType::NotNumeric))
                 return true;
         }
 
@@ -161,30 +155,47 @@ class $modify(CCMouseDispatcher) {
 
         auto val = 0.0f;
 
-        if (std::string(self->getString()).c_str() && strlen(self->getString().c_str()))
-            try { val = std::stof(self->getString()); }
+        if (strlen(self->getString().c_str()) > 0)
+            try { val = std::stof(self->getString().c_str()); }
         catch (...) {}
 
-        float inc = INC_NORMAL;
+        float inc = kb->getControlKeyPressed() ? INCREMENT_BIG : INCREMENT_NORMAL;
 
-        if (kb->getControlKeyPressed()) inc = INC_BIG;
-        if ((type & ftFloat) && kb->getShiftKeyPressed()) inc = INC_SMALL;
+        if ((type & static_cast<int>(FieldType::Float)) && kb->getShiftKeyPressed())
+            inc = INCREMENT_SMALL;
 
-        val += -(x / 12.0f) * inc;
+        float scrollSpeed = Mod::get()->getSettingValue<double>("scroll-speed");
+        inc *= scrollSpeed;
 
-        if (type & ftSigned) {
-            if (val < MIN_SIGNED) val = MIN_SIGNED;
+        float smoothness = Mod::get()->getSettingValue<double>("scroll-smoothness");
+        float stepSize = Mod::get()->getSettingValue<double>("scroll-step-size");
+        float acceleration = Mod::get()->getSettingValue<double>("scroll-acceleration");
+
+        float delta = -(x / 12.0f) * inc;
+        delta *= acceleration;
+        delta *= smoothness;
+        delta *= stepSize;
+        val += (Mod::get()->getSettingValue<bool>("scroll-reverse") ? -delta : delta);
+
+        if (Mod::get()->getSettingValue<bool>("scroll-boundaries")) {
+            if (type & static_cast<int>(FieldType::Signed)) {
+                if (val < MIN_SIGNED)
+                    val = MIN_SIGNED;
+                else if (val > MAX_SIGNED)
+                    val = MAX_SIGNED;
+            }
+            else {
+                if (val < MIN_UNSIGNED)
+                    val = MIN_UNSIGNED;
+                else if (val > MAX_SIGNED)
+                    val = MIN_UNSIGNED;
+            }
         }
-        else
-            if (val < MIN_UNSIGNED) val = MIN_UNSIGNED;
 
-        if (val > MAX_SIGNED)
-            val = MAX_SIGNED;
-
-        if (!(type & ftFloat))
+        if (!(type & static_cast<int>(FieldType::Float)))
             val = std::roundf(val);
 
-        self->setString(formatToString(val).c_str());
+        self->setString(formatNumericToString(val).c_str());
 
         if (self->m_delegate)
             self->m_delegate->textChanged(self);
@@ -192,3 +203,10 @@ class $modify(CCMouseDispatcher) {
         return true;
     }
 };
+
+
+$on_mod(Loaded) {
+#ifdef GEODE_IS_WINDOWS
+    //matdash::create_console();
+#endif
+}
