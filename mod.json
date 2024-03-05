@@ -5,7 +5,10 @@
 	"id": "tpdea.scroll_any_input",
 	"name": "Scroll Any Input",
 	"developer": "Tpdea",
-	"description": "GD Mod that enables smooth and customizable scrolling using the mouse wheel on numeric input fields.",
+  
+	"description": "Allows you to use the scroll wheel on numeric inputs",
+	"repository": "https://github.com/TpdeaX/ScrollAnyInput-Geode",
+
 	"tags": [ "Utility" ],
 	"settings": {
 		"scroll-speed": {
